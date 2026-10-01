@@ -19,7 +19,7 @@ Designed for Apple Silicon Macs operating without built-in or accessible Touch I
 
 ## Requirements
 
-- Apple Silicon Mac running macOS 15+ (Sequoia / Tahoe)
+- Apple Silicon Mac running macOS 26+ (Tahoe)
 - Apple Watch running watchOS 10+ paired to the Mac
 - Wrist detection enabled and watch unlocked
 - **"Use your Apple Watch to unlock apps and your Mac"** enabled under **System Settings → Touch ID & Password**
@@ -32,19 +32,19 @@ Designed for Apple Silicon Macs operating without built-in or accessible Touch I
 ### 1. Compile
 
 ```bash
-make
-make verify
+nix build
 ```
 
-This compiles `build/pam_watchid.so` with `-Wall -Wextra -Werror` and verifies symbol exports.
+This compiles the module with `-Wall -Wextra -Werror` and, as part of the build, verifies
+the Mach-O type and that the required `pam_sm_*` symbols are exported. The result is linked
+at `result/lib/pam/pam_watchid.so`.
 
 ### 2. Standalone Test (Zero-Risk)
 
 Before touching system PAM configurations, you can test the module using the standalone harness:
 
 ```bash
-make harness
-./build/harness
+nix run .#harness
 ```
 
 This initiates an isolated PAM transaction, triggers the Apple Watch prompt, and verifies wrist approval and Control-C cancellation without modifying `/etc/pam.d/`.

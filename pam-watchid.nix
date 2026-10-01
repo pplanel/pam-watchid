@@ -18,7 +18,7 @@ final: prev: {
     buildPhase = ''
       runHook preBuild
       mkdir -p build
-      $CC -fobjc-arc -O2 -Wall -Wextra -mmacosx-version-min=15.0 \
+      $CC -fobjc-arc -O2 -Wall -Wextra -mmacosx-version-min=26.0 \
         -bundle -undefined dynamic_lookup \
         -Wl,-install_name,pam_watchid.so \
         -framework Foundation -framework LocalAuthentication -framework SystemConfiguration \

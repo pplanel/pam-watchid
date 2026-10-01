@@ -10,7 +10,7 @@
 
 let
   sdk =
-    if (apple-sdk != null && apple-sdk ? version && lib.versionAtLeast apple-sdk.version "15.0") then
+    if (apple-sdk != null && apple-sdk ? version && lib.versionAtLeast apple-sdk.version "26.0") then
       apple-sdk
     else if apple-sdk_26 != null then
       apple-sdk_26
@@ -32,6 +32,10 @@ stdenv.mkDerivation {
         base != "build" && base != ".git" && base != "result";
   };
 
+  nativeBuildInputs = [
+    pkgs.file
+  ];
+
   buildInputs = [
     sdk
     openpam
@@ -40,12 +44,27 @@ stdenv.mkDerivation {
   buildPhase = ''
     runHook preBuild
     mkdir -p build
-    $CC -fobjc-arc -O2 -Wall -Wextra -mmacosx-version-min=15.0 \
+    $CC -fobjc-arc -O2 -Wall -Wextra -Werror -mmacosx-version-min=26.0 \
       -bundle -undefined dynamic_lookup \
       -Wl,-install_name,pam_watchid.so \
       -framework Foundation -framework LocalAuthentication -framework SystemConfiguration \
       -o build/pam_watchid.so src/pam_watchid.m
+    echo "built build/pam_watchid.so"
     runHook postBuild
+  '';
+
+  # Equivalent of the former `make verify`: confirm the Mach-O type and that the
+  # required PAM entry points are exported before the module is installed.
+  doCheck = true;
+  checkPhase = ''
+    runHook preCheck
+    file build/pam_watchid.so
+    nm -gU build/pam_watchid.so | grep pam_sm_ || {
+      echo "MISSING pam_sm_* exports" >&2
+      exit 1
+    }
+    codesign -dv build/pam_watchid.so 2>&1 | head -3 || true
+    runHook postCheck
   '';
 
   installPhase = ''

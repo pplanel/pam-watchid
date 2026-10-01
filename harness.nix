@@ -26,7 +26,7 @@ stdenv.mkDerivation {
   buildPhase = ''
     runHook preBuild
     mkdir -p build
-    $CC -fobjc-arc -O2 -Wall -Wextra -mmacosx-version-min=15.0 \
+    $CC -fobjc-arc -O2 -Wall -Wextra -mmacosx-version-min=26.0 \
       -framework Foundation \
       -o build/harness test/harness.m
     runHook postBuild

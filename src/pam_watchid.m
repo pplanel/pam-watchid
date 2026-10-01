@@ -1,7 +1,7 @@
 /*
  * pam_watchid — Pluggable Authentication Module (PAM) for Apple Watch double-click approval.
  *
- * Target: macOS 15+ (Sequoia / Tahoe), Apple Silicon, watchOS 10+.
+ * Target: macOS 26+ (Tahoe), Apple Silicon, watchOS 10+.
  *
  * Architecture & Design:
  * =======================
