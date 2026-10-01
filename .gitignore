@@ -9,3 +9,7 @@ build/
 .claude/scheduled_tasks.json
 build
 /result
+
+# Nix binary-cache signing keys — NEVER commit the private key
+secret.key
+*.secret.key

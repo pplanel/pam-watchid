@@ -1,0 +1,56 @@
+name: Publish Binary Cache
+
+# Builds the flake's aarch64-darwin outputs (pam_watchid + harness) and pushes
+# the resulting NARs to this repo's GHCR-backed Nix binary cache
+# (ghcr.io/<owner>/<repo>/nix-cache), so `nix build` on a client with the
+# nixcache-oci proxy configured pulls prebuilt binaries instead of compiling.
+#
+# Runs on a macOS arm64 runner because pam_watchid is a Darwin-only package and
+# cannot be built on the upstream project's ubuntu runner. The vendored
+# lib/cache-builder.sh is GNU/bash-4+ oriented, so it is invoked inside a
+# `nix shell` that provides GNU coreutils/grep/sed and bash 5.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: macos-15   # Apple Silicon (arm64) runner — required for aarch64-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Set up signing key
+        run: |
+          if [[ -n "${{ secrets.NIX_SIGNING_KEY }}" ]]; then
+            printf '%s' "${{ secrets.NIX_SIGNING_KEY }}" > "$RUNNER_TEMP/signing-key"
+            nix key convert-secret-to-public < "$RUNNER_TEMP/signing-key" > "$RUNNER_TEMP/signing-key.pub"
+            echo "NIXCACHE_SIGNING_KEY_FILE=$RUNNER_TEMP/signing-key" >> "$GITHUB_ENV"
+            echo ">>> Signing enabled; public key: $(cat "$RUNNER_TEMP/signing-key.pub")"
+          else
+            echo "::error::NIX_SIGNING_KEY secret is not set. Add it (contents of secret.key) or the cache will be unsigned."
+            exit 1
+          fi
+
+      - name: Build and publish cache
+        env:
+          NIXCACHE_REPO: ${{ github.repository }}
+          NIXCACHE_CONFIG_DIR: .
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          nix shell \
+            nixpkgs#bash nixpkgs#coreutils nixpkgs#gnugrep nixpkgs#gnused \
+            nixpkgs#jq nixpkgs#curl nixpkgs#xz nixpkgs#python3 \
+            --command bash -euo pipefail -c '
+              source lib/cache-builder.sh
+              full_pipeline
+            '
