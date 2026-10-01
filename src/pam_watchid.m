@@ -399,11 +399,16 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) 
     os_log_t log = os_log_create("org.pam.watchid", "auth");
     pam_options_t opts = parse_options(argc, argv);
 
-    /* 1. Respect PAM_SILENT: Do not present visual or haptic notifications if silence requested. */
-    if (flags & PAM_SILENT) {
-        if (opts.debug) os_log_debug(log, "PAM_SILENT requested; skipping prompt.");
-        return PAM_AUTHINFO_UNAVAIL;
-    }
+    /*
+     * 1. PAM_SILENT does NOT mean "do not authenticate" — it means "do not emit
+     *    PAM conversation text". Apple's pam_tid.so still presents its UI under
+     *    PAM_SILENT, and sudo 1.9.16+ sets PAM_SILENT by default (the sudoers
+     *    `pam_silent` option is on by default). This module never calls the PAM
+     *    conversation function (it uses an LAContext prompt + os_log), so there
+     *    is nothing to silence — proceed regardless of the flag. Bailing here
+     *    skipped the watch prompt on any host without `Defaults !pam_silent`.
+     */
+    (void)flags;
 
     /* 2. Disallow remote connections (e.g. SSH): Protect against unauthorized remote triggers. */
     if (!opts.allowRemote) {
