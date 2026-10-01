@@ -56,7 +56,11 @@ module cache); frameworks are linked explicitly.
 Flow of `pam_sm_authenticate`, in order — each gate returns `PAM_AUTHINFO_UNAVAIL` to
 fall through to the next PAM module rather than failing the stack:
 
-1. `PAM_SILENT` → skip (no UI).
+1. `PAM_SILENT` is **ignored** (the flag is `(void)`-cast). It means "suppress PAM
+   conversation text", not "skip auth" — and sudo 1.9.16+ sets it by default, so bailing
+   here skipped the watch prompt on any host without `Defaults !pam_silent`. The module
+   uses an `LAContext` prompt + `os_log`, never the PAM conversation, so there's nothing
+   to silence. (Matches `pam_tid.so`.)
 2. Remote rejection: `PAM_RHOST` non-empty, or (no tty + `SSH_CONNECTION`) → skip, unless
    `allow_remote` is set.
 3. `is_console_user()` — **anti-confused-deputy core**: via `SCDynamicStoreCopyConsoleUser`,
