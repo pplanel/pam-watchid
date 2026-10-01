@@ -231,10 +231,12 @@ This repo publishes its prebuilt `aarch64-darwin` outputs to a GHCR-backed Nix b
 cache (via [nixcache-oci](https://github.com/cmspam/nixcache-oci)), so clients substitute
 `pam_watchid` instead of recompiling it.
 
-**How it works:** the `publish-cache` workflow builds the flake's Darwin outputs on a macOS
-arm64 runner and pushes signed NARs to `ghcr.io/pplanel/pam_watchid/nix-cache`. A small
-local proxy (`nix run github:pplanel/pam_watchid#cache-proxy`) bridges Nix's cache protocol
-to that registry on `http://127.0.0.1:37515`.
+**How it works:** the `publish-cache` workflow (a thin caller of the reusable workflow in
+[pplanel/nixcache](https://github.com/pplanel/nixcache)) builds the flake's Darwin outputs on
+a macOS arm64 runner and pushes signed NARs to `ghcr.io/pplanel/pam_watchid/nix-cache`. A
+small local proxy from `nixcache` (`nix run github:pplanel/nixcache#cache-proxy` with
+`NIXCACHE_REPO=pplanel/pam_watchid`) bridges Nix's cache protocol to that registry on
+`http://127.0.0.1:37515`.
 
 Signing key: private key lives in the repo Actions secret `NIX_SIGNING_KEY`; the public key
 is in [`public-key.txt`](public-key.txt):
@@ -247,22 +249,29 @@ pam-watchid-cache-1:cipv8xpwzNYvPYw/Zx71IkouiDY3vOWxryEfQtIHfzo=
 GHCR package **public** so clients can pull anonymously — GitHub → your profile → Packages →
 `nix-cache` → Package settings → Change visibility → Public.
 
-**Consume it on nix-darwin** — add this flake as an input and import the module:
+**Consume it on nix-darwin** — use the `nixcache` module (which packages the proxy):
 
 ```nix
 {
-  inputs.pam-watchid.url = "github:pplanel/pam_watchid";
+  inputs.nixcache.url = "github:pplanel/nixcache";
 
   # in darwinConfigurations."my-mac".modules:
   modules = [
-    pam-watchid.darwinModules.default
-    { services.nixcache-proxy.enable = true; }   # repo + publicKey default to this cache
+    nixcache.darwinModules.default
+    {
+      services.nixcache-proxy = {
+        enable = true;
+        repo = "pplanel/pam_watchid";
+        publicKey = "pam-watchid-cache-1:cipv8xpwzNYvPYw/Zx71IkouiDY3vOWxryEfQtIHfzo=";
+      };
+    }
   ];
 }
 ```
 
 This runs the proxy as a launchd daemon and registers it as a trusted substituter. To wire a
-plain (non-nix-darwin) system by hand, run the proxy and add to `nix.conf`:
+plain (non-nix-darwin) system by hand, run the proxy (`NIXCACHE_REPO=pplanel/pam_watchid nix
+run github:pplanel/nixcache#cache-proxy`) and add to `nix.conf`:
 
 ```
 extra-substituters = http://127.0.0.1:37515
