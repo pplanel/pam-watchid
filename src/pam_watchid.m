@@ -84,6 +84,32 @@ typedef struct {
 } pam_options_t;
 
 /**
+ * Safely converts a NUL-terminated C string to an NSString.
+ *
+ * `+stringWithUTF8String:` returns nil for any byte sequence that is not valid
+ * UTF-8 (process arguments and filenames on macOS may contain arbitrary bytes).
+ * Returning nil here and feeding it to an NSMutableArray/NSString format would
+ * throw an uncaught Obj-C exception and abort the PAM host (sudo). This never
+ * returns nil: it falls back to lossless Latin-1, then to a placeholder.
+ *
+ * @param s C string (may be NULL).
+ * @return A non-nil NSString.
+ */
+static NSString *ns_from_cstr(const char *s) {
+    if (s == NULL) {
+        return @"?";
+    }
+    NSString *r = [[NSString alloc] initWithBytes:s
+                                           length:strlen(s)
+                                         encoding:NSUTF8StringEncoding];
+    if (r == nil) {
+        /* Lossless fallback so no byte is dropped and no exception is thrown. */
+        r = [[NSString alloc] initWithCString:s encoding:NSISOLatin1StringEncoding];
+    }
+    return r ?: @"?";
+}
+
+/**
  * Parses command-line arguments passed to the PAM module in pam.d configuration.
  *
  * Supported arguments:
@@ -103,18 +129,26 @@ static pam_options_t parse_options(int argc, const char **argv) {
         .customReason = nil,
     };
 
-    for (int i = 0; i < argc; i++) {
-        if (!argv[i]) continue;
-        if (strcmp(argv[i], "debug") == 0) {
-            opts.debug = YES;
-        } else if (strcmp(argv[i], "allow_remote") == 0) {
-            opts.allowRemote = YES;
-        } else if (strncmp(argv[i], "timeout=", 8) == 0) {
-            int val = atoi(argv[i] + 8);
-            if (val > 0) opts.timeoutSec = val;
-        } else if (strncmp(argv[i], "reason=", 7) == 0) {
-            const char *val = argv[i] + 7;
-            if (*val) opts.customReason = [NSString stringWithUTF8String:val];
+    /*
+     * PAM modules are loaded into hosts with no active autorelease pool, so any
+     * autoreleased object created here (the reason NSString) would leak and emit
+     * a "no pool in place - just leaking" warning. The strong struct member
+     * retains customReason, so it outlives this pool.
+     */
+    @autoreleasepool {
+        for (int i = 0; i < argc; i++) {
+            if (!argv[i]) continue;
+            if (strcmp(argv[i], "debug") == 0) {
+                opts.debug = YES;
+            } else if (strcmp(argv[i], "allow_remote") == 0) {
+                opts.allowRemote = YES;
+            } else if (strncmp(argv[i], "timeout=", 8) == 0) {
+                int val = atoi(argv[i] + 8);
+                if (val > 0) opts.timeoutSec = val;
+            } else if (strncmp(argv[i], "reason=", 7) == 0) {
+                const char *val = argv[i] + 7;
+                if (*val) opts.customReason = ns_from_cstr(val);
+            }
         }
     }
     return opts;
@@ -155,9 +189,15 @@ static BOOL is_console_user(const char *target_username, os_log_t log) {
     NSString *console_user = (__bridge_transfer NSString *)console_user_cf;
     uid_t caller_uid = getuid();
 
-    /* Case 1: Standard sudo (target is root). Confirm the invoking user owns the console. */
+    /*
+     * Case 1: Standard sudo (target is root). Confirm the invoking user owns the
+     * console. We deliberately do NOT special-case caller_uid == 0: a root-owned
+     * background/daemon process must not be able to buzz the console owner's watch
+     * for a root action (confused-deputy). A root caller gains nothing from the
+     * prompt anyway, so falling through to the next PAM module is correct.
+     */
     if (strcmp(target_username, "root") == 0) {
-        if (caller_uid == console_uid || caller_uid == 0) {
+        if (caller_uid == console_uid) {
             return YES;
         }
         os_log_debug(log, "Caller UID %u does not match active console user UID %u.", caller_uid, console_uid);
@@ -191,9 +231,14 @@ static NSString *get_computer_name(void) {
 
     char host[256];
     if (gethostname(host, sizeof(host)) == 0 && host[0] != '\0') {
-        char *dot = strstr(host, ".local");
-        if (dot) *dot = '\0';
-        return [NSString stringWithUTF8String:host];
+        /* Strip a trailing ".local" suffix only (not a mid-name match like "my.localhost"). */
+        static const char kSuffix[] = ".local";
+        size_t hlen = strlen(host);
+        size_t slen = sizeof(kSuffix) - 1;
+        if (hlen >= slen && strcmp(host + hlen - slen, kSuffix) == 0) {
+            host[hlen - slen] = '\0';
+        }
+        return ns_from_cstr(host);
     }
     return @"Mac";
 }
@@ -275,7 +320,7 @@ static NSString *get_parent_and_tty(void) {
 static NSString *get_target_command(void) {
     const char *prog = getprogname();
     if (prog == NULL || strcmp(prog, "sudo") != 0) {
-        return prog ? [NSString stringWithUTF8String:prog] : @"command";
+        return prog ? ns_from_cstr(prog) : @"command";
     }
 
     int mib[3] = { CTL_KERN, KERN_PROCARGS2, getpid() };
@@ -302,16 +347,22 @@ static NSString *get_target_command(void) {
      */
     int proc_argc = *(int *)buffer;
     char *p = buffer + sizeof(int);
+    char *end = buffer + size;
 
-    /* Skip executable path */
-    while (*p != '\0') p++;
-    /* Skip null padding */
-    while (*p == '\0') p++;
+    /* Skip executable path (bounded against the buffer end). */
+    while (p < end && *p != '\0') p++;
+    /* Skip null padding (bounded against the buffer end). */
+    while (p < end && *p == '\0') p++;
 
     NSMutableArray<NSString *> *args = [NSMutableArray array];
-    for (int i = 0; i < proc_argc && (p - buffer) < (ptrdiff_t)size; i++) {
-        [args addObject:[NSString stringWithUTF8String:p]];
-        p += strlen(p) + 1;
+    for (int i = 0; i < proc_argc && p < end; i++) {
+        size_t len = strnlen(p, (size_t)(end - p));
+        NSString *arg = [[NSString alloc] initWithBytes:p length:len encoding:NSUTF8StringEncoding];
+        if (arg == nil) {
+            arg = [[NSString alloc] initWithBytes:p length:len encoding:NSISOLatin1StringEncoding];
+        }
+        [args addObject:arg ?: @"?"];
+        p += len + 1;
     }
     free(buffer);
 
@@ -434,9 +485,15 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) 
         return PAM_AUTHINFO_UNAVAIL;
     }
 
-    /* 5. Check interactive terminal: Fall back if stdin is not a TTY and SSH is detected. */
+    /*
+     * 5. Reject SSH sessions regardless of pty allocation. The earlier PAM_RHOST
+     *    gate catches most remote callers, but `ssh -t` allocates a pty (so
+     *    isatty() is true); keying only on SSH_CONNECTION closes that gap. The
+     *    `allow_remote` option remains the explicit escape hatch.
+     */
     if (!opts.allowRemote) {
-        if (!isatty(STDIN_FILENO) && getenv("SSH_CONNECTION") != NULL) {
+        if (getenv("SSH_CONNECTION") != NULL || getenv("SSH_TTY") != NULL) {
+            if (opts.debug) os_log_debug(log, "SSH session detected; skipping watch prompt.");
             return PAM_AUTHINFO_UNAVAIL;
         }
     }
@@ -502,7 +559,17 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) 
             dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0)
         );
 
+        /*
+         * A GCD signal source observes SIGINT but does NOT replace the signal's
+         * default disposition — SIGINT's default action is to terminate the
+         * process. Without ignoring it here, Control-C would kill the host
+         * (certainly in the standalone harness) before/instead of running the
+         * handler that invalidates the context. Ignore it for the duration of
+         * the wait, then restore the previous disposition.
+         */
+        void (*prevSigint)(int) = SIG_ERR;
         if (sigSource) {
+            prevSigint = signal(SIGINT, SIG_IGN);
             dispatch_source_set_event_handler(sigSource, ^{
                 os_log_debug(log, "SIGINT caught; cancelling watch prompt.");
                 [context invalidate];
@@ -516,7 +583,7 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) 
             if (success) {
                 result = PAM_SUCCESS;
             } else if (error != nil && [error.domain isEqualToString:LAErrorDomain]) {
-                if (opts.debug) fprintf(stderr, "LAError code: %ld\n", (long)error.code);
+                if (opts.debug) os_log_debug(log, "LAError code: %ld", (long)error.code);
                 switch (error.code) {
                     case LAErrorUserCancel:
                         /* Explicit user cancellation: fail auth to stop the chain. */
@@ -539,7 +606,7 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) 
                         break;
                 }
             } else {
-                if (opts.debug && error) fprintf(stderr, "Unknown error: %s\n", error.description.UTF8String);
+                if (opts.debug && error) os_log_debug(log, "Unknown error: %{public}@", error.description);
                 result = PAM_AUTH_ERR;
             }
             dispatch_semaphore_signal(done);
@@ -555,13 +622,23 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) 
         if (dispatch_semaphore_wait(done, timeout) != 0) {
             os_log_error(log, "Authentication timed out after %lld seconds.", opts.timeoutSec);
             [context invalidate];
-            dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC));
-            result = PAM_AUTHINFO_UNAVAIL;
+            /*
+             * Only write `result` from this thread if the reply block never ran;
+             * otherwise we would race the block's own write. If the grace wait
+             * succeeds, the reply block completed and its result (e.g. the
+             * invalidate's LAErrorAppCancel -> PAM_AUTHINFO_UNAVAIL) stands.
+             */
+            if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC)) != 0) {
+                result = PAM_AUTHINFO_UNAVAIL;
+            }
         }
 
-        /* Teardown the signal handler to restore standard terminal behavior */
+        /* Teardown the signal handler and restore the previous SIGINT disposition. */
         if (sigSource) {
             dispatch_source_cancel(sigSource);
+            if (prevSigint != SIG_ERR) {
+                signal(SIGINT, prevSigint);
+            }
         }
     }
 
